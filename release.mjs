@@ -33,10 +33,19 @@ function isSemverTag(value) {
   return /^v?\d+\.\d+\.\d+$/.test(String(value).trim());
 }
 
+function currentTagLabel() {
+  const exactTag = git(["describe", "--tags", "--exact-match", "HEAD"], { capture: true });
+  if (exactTag) {
+    return exactTag;
+  }
+
+  return git(["describe", "--tags", "--abbrev=0"], { capture: true });
+}
+
 async function askTagName() {
   const rl = createInterface({ input, output });
   try {
-    const tagName = (await rl.question("Tag name (example 0.2.0): ")).trim();
+    const tagName = (await rl.question(`Tag name (attuale ${currentTagLabel()}): `)).trim();
 
     if (!tagName) {
       fail("tag name is required");
