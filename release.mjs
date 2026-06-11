@@ -29,17 +29,37 @@ function git(args, options = {}) {
   return result.stdout?.trim() ?? "";
 }
 
-function isSemverTag(value) {
-  return /^v?\d+\.\d+\.\d+$/.test(String(value).trim());
+function gitMaybe(args) {
+  const result = spawnSync("git", args, {
+    cwd: repoDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function parseSemverTag(value) {
+  const match = String(value).trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    tag: String(value).trim(),
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
 }
 
 function currentTagLabel() {
-  const exactTag = git(["describe", "--tags", "--exact-match", "HEAD"], { capture: true });
+  const exactTag = gitMaybe(["describe", "--tags", "--exact-match", "HEAD"]);
   if (exactTag) {
     return exactTag;
   }
 
-  return git(["describe", "--tags", "--abbrev=0"], { capture: true });
+  return gitMaybe(["describe", "--tags", "--abbrev=0"]) || "none";
 }
 
 async function askTagName() {
@@ -51,11 +71,12 @@ async function askTagName() {
       fail("tag name is required");
     }
 
-    if (!isSemverTag(tagName)) {
+    const version = parseSemverTag(tagName);
+    if (!version) {
       fail(`"${tagName}" is not a valid SemVer tag. Use x.y.z, for example 0.2.0`);
     }
 
-    return tagName;
+    return version;
   } finally {
     rl.close();
   }
@@ -72,50 +93,76 @@ function currentBranch() {
   return git(["branch", "--show-current"], { capture: true });
 }
 
-function ensureOnBranch(tagName) {
+function stashLocalChanges() {
+  git(["stash", "push", "--include-untracked", "-m", "release local changes"]);
+}
+
+function restoreLocalChanges() {
+  git(["stash", "pop", "--index"]);
+}
+
+function majorBranchName(version) {
+  return `${version.major}.x`;
+}
+
+function ensureOnMajorBranch(version) {
+  const majorBranch = majorBranchName(version);
   const branch = currentBranch();
-  if (branch) {
+  if (branch === majorBranch) {
     return branch;
   }
 
-  const releaseBranch = `release/${tagName}`;
-  const localBranch = git(["branch", "--list", releaseBranch], { capture: true });
+  stashLocalChanges();
 
-  if (localBranch) {
-    fail(`branch ${releaseBranch} already exists locally`);
+  try {
+    git(["fetch", "origin", "--prune"]);
+
+    const localBranch = git(["branch", "--list", majorBranch], { capture: true });
+    if (localBranch) {
+      git(["switch", majorBranch]);
+    } else {
+      const remoteBranch = git(["branch", "--remotes", "--list", `origin/${majorBranch}`], { capture: true });
+      if (remoteBranch) {
+        git(["switch", "--track", `origin/${majorBranch}`]);
+      } else {
+        git(["switch", "--create", majorBranch]);
+      }
+    }
+
+    restoreLocalChanges();
+    return majorBranch;
+  } catch (error) {
+    fail(`could not switch to ${majorBranch}: ${error.message}`);
   }
-
-  git(["switch", "--create", releaseBranch]);
-  return releaseBranch;
 }
 
-function ensureReleaseCanBeCreated(tagName) {
-  const existingTag = git(["tag", "--list", tagName], { capture: true });
+function ensureReleaseCanBeCreated(version) {
+  const existingTag = git(["tag", "--list", version.tag], { capture: true });
   if (existingTag) {
-    fail(`tag ${tagName} already exists locally`);
+    fail(`tag ${version.tag} already exists locally`);
   }
 
   git(["fetch", "--tags", "--prune"]);
 
-  const fetchedTag = git(["tag", "--list", tagName], { capture: true });
+  const fetchedTag = git(["tag", "--list", version.tag], { capture: true });
   if (fetchedTag) {
-    fail(`tag ${tagName} already exists after fetching tags`);
+    fail(`tag ${version.tag} already exists after fetching tags`);
   }
 }
 
 try {
   ensureStagedChangesExist();
-  const tagName = await askTagName();
-  ensureReleaseCanBeCreated(tagName);
-  const branch = ensureOnBranch(tagName);
-  const message = `Release ${tagName}`;
+  const version = await askTagName();
+  ensureReleaseCanBeCreated(version);
+  const branch = ensureOnMajorBranch(version);
+  const message = `Release ${version.tag}`;
 
   git(["commit", "-m", message]);
-  git(["tag", "-a", tagName, "-m", message]);
+  git(["tag", "-a", version.tag, "-m", message]);
   git(["push", "origin", branch]);
-  git(["push", "origin", tagName]);
+  git(["push", "origin", version.tag]);
 
-  console.log(`released ${tagName}`);
+  console.log(`released ${version.tag} on ${branch}`);
 } catch (error) {
   fail(error.message);
 }
