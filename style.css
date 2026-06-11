@@ -3,5 +3,5 @@ body {
 }
 
 h1::after {
-    content: "1.0.1";
+    content: "1.0.2";
 }
